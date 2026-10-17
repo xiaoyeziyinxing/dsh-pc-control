@@ -1,0 +1,7 @@
+- insert:
+    - id: pc-control
+      name: dsh-pc-control
+      config:
+        confirmActions: true
+        failSafePx: 10
+        ocrLang: zh-Hans-CN

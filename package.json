@@ -1,0 +1,46 @@
+{
+  "name": "dsh-pc-control",
+  "version": "0.2.0",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "description": "DeepSeek Harness 电脑操控插件：pc_screenshot（截屏+WinRT OCR 词级坐标）/ pc_click / pc_type（中文剪贴板粘贴）/ pc_key / pc_scroll / pc_ball（Trae 风格悬浮球），FailSafe 左上角保命 + 写操作确认守卫（TypeScript + vitest）",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "license": "MIT",
+  "author": "xiaoyeziyinxing",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xiaoyeziyinxing/dsh-pc-control.git"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "computer-use",
+    "automation",
+    "ocr",
+    "agent"
+  ],
+  "files": [
+    "lib",
+    "cordis.patch.yml"
+  ],
+  "exports": {
+    ".": "./lib/index.js"
+  },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "manifestVersion": 1
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^3.0.0"
+  }
+}
