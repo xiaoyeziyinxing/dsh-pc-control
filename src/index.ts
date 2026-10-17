@@ -21,9 +21,10 @@ import { spawn, spawnSync } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import sz from '@deepseek-ai/schemastery'
 import { defineTool } from './vendor.js'
-import { PS_BALL_SCRIPT, PS_INPUT_SCRIPT, PS_SCREEN_SCRIPT } from './scripts.js'
+import { PS_BALL_SCRIPT, PS_CHAT_SCRIPT, PS_INPUT_SCRIPT, PS_SCREEN_SCRIPT } from './scripts.js'
 import {
   TOOL_CLASS, describeAction, isHighRisk, normalizeKeyCombo,
 } from './actions.js'
@@ -124,11 +125,13 @@ export function apply(ctx: HostCtx, config: PcControlConfig = {}): void {
   const screenScriptPath = join(PS_DIR, 'pc-screen.ps1')
   const inputScriptPath = join(PS_DIR, 'pc-input.ps1')
   const ballScriptPath = join(PS_DIR, 'pc-ball.ps1')
+  const chatScriptPath = join(PS_DIR, 'pc-chat.ps1')
   try {
     mkdirSync(PS_DIR, { recursive: true })
     writeFileSync(screenScriptPath, Buffer.concat([UTF8_BOM, Buffer.from(PS_SCREEN_SCRIPT, 'utf8')]))
     writeFileSync(inputScriptPath, Buffer.concat([UTF8_BOM, Buffer.from(PS_INPUT_SCRIPT, 'utf8')]))
     writeFileSync(ballScriptPath, Buffer.concat([UTF8_BOM, Buffer.from(PS_BALL_SCRIPT, 'utf8')]))
+    writeFileSync(chatScriptPath, Buffer.concat([UTF8_BOM, Buffer.from(PS_CHAT_SCRIPT, 'utf8')]))
   } catch (e) {
     console.log('[pc-control] script write failed:', (e as Error)?.message)
   }
@@ -143,23 +146,32 @@ export function apply(ctx: HostCtx, config: PcControlConfig = {}): void {
     return r
   }
 
-  // ①' Trae 风格悬浮球：独立 PS WinForms 分离进程（TopMost 圆球，点击打开带 token 的 AI 对话页）。
+  // ①' Trae 风格悬浮球：独立 PS WinForms 分离进程（TopMost 圆球，点击弹出独立悬浮对话窗）。
   // 生命周期与宿主对齐：dispose 时杀球（dsh-reboot 强杀进程树也会连带）；宿主重启后插件重载自动再起。
+  // 悬浮对话窗：点球 → pc-chat.ps1（WinForms 无边框 + WebView2 承载对话页，非浏览器窗口）。
+  // WebView2 托管三件套 vendor 在插件内（Evergreen Runtime 是 Win11 系统组件），路径透传给球 → 窗。
+  const vendorDir = fileURLToPath(new URL('../vendor/webview2', import.meta.url))
   const ballPidFile = join(PS_DIR, 'ball-pid.json')
+  const chatPidFile = join(PS_DIR, 'chat-pid.json')
   const ballPosFile = join(PS_DIR, 'ball-pos.json')
   let ballUrl: string | undefined
   let ballRunning = false
 
-  /** 杀掉现存悬浮球进程（幂等；spawnSync 确保杀完再返回，防 show 竞态双球）。
-   *  pid 文件由球进程自写（PS Set-Content -Encoding UTF8 带 BOM），解析前必须剥 BOM */
-  const killBall = (): void => {
+  /** 杀掉现存悬浮球进程 + 常驻对话窗（幂等；spawnSync 确保杀完再返回，防 show 竞态双球）。
+   *  pid 文件由球/窗进程自写（PS Set-Content -Encoding UTF8 带 BOM），解析前必须剥 BOM。
+   *  对话窗常驻（关闭=隐藏），球被 taskkill 强杀时无法自清理，必须在此连带杀 */
+  const killByPidFile = (file: string): void => {
     try {
-      const raw = readFileSync(ballPidFile, 'utf8').replace(/^\uFEFF/, '')
+      const raw = readFileSync(file, 'utf8').replace(/^\uFEFF/, '')
       const pid = Number((JSON.parse(raw) as { pid?: unknown }).pid)
       if (Number.isInteger(pid) && pid > 0) {
         spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true, timeout: 5000 })
       }
-    } catch { /* 无 pid 文件 = 无球 */ }
+    } catch { /* 无 pid 文件 = 无进程 */ }
+  }
+  const killBall = (): void => {
+    killByPidFile(ballPidFile)
+    killByPidFile(chatPidFile)
   }
 
   /**
@@ -179,6 +191,7 @@ export function apply(ctx: HostCtx, config: PcControlConfig = {}): void {
         Color: /^#[0-9a-fA-F]{6}$/.test(config.ballColor ?? '') ? config.ballColor : '#0A84FF',
         PosFile: ballPosFile,
         PidFile: ballPidFile,
+        DllDir: vendorDir,
       })
       const relay = spawn(
         'powershell.exe',

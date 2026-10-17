@@ -17,13 +17,15 @@ OCR 采用 Windows.Media.Ocr（本地引擎，离线，不用视觉模型）；�
 
 web / 桌面客户端下插件加载后**自动在屏幕右上角显示一个置顶圆球**：
 
-- **单击**：打开默认浏览器进入带登录态的 AI 对话页（URL 由宿主 webApp/connection 服务动态签发，含 token）
+- **单击**：弹出**独立悬浮对话窗**（400×640，贴着球出现）——WinForms 无边框圆角窗 + WebView2 承载带登录态的 AI 对话页（URL 由宿主 webApp/connection 服务动态签发，含 token）。不是浏览器窗口：无地址栏、无标签页、无浏览器边框，置顶悬浮
+- **对话窗常驻（客户端式）**：× 或 Esc 关闭只是**隐藏**（进程与页面状态保留），再点球**秒级唤起、不重新加载**；网页只加载一次。真退出仅两条路：球右键退出连带杀窗 / 宿主退出或重载时清理
+- **对话窗交互**：顶栏可拖动窗口；首访自动关掉「预览版说明」公告；DPI aware（高缩放屏不拉伸不发糊）
 - **拖动**：按住左键拖到任意位置，松开即落位；位置跨次启动记忆（`%TEMP%\dsh-pc-control\ball-pos.json`）
-- **右键**：菜单——打开 AI 对话 / 退出悬浮球
+- **右键**：菜单——打开 AI 对话（同单击弹出对话窗）/ 退出悬浮球
 - 退出宿主（含插件卸载/重载）时球自动退出；宿主被强杀残留的球会在下次宿主启动时自动清理
 - LLM 侧可用 `pc_ball` 工具显式控制（show / hide / status）；隐藏后 `show` 可再次唤出
 
-实现为独立 PowerShell WinForms 进程（经 PS 中继 `Start-Process` 拉起，规避 node 直接 detached spawn 导致 PS 控制台主机秒退的坑），零额外依赖。相关配置：`ballEnabled`（默认 true）/ `ballSize`（默认 64px）/ `ballColor`（默认 #0A84FF）。
+实现为独立 PowerShell WinForms 进程（经 PS 中继 `Start-Process` 拉起，规避 node 直接 detached spawn 导致 PS 控制台主机秒退的坑），零额外依赖。对话窗的 WebView2 托管三件套（SDK 1.0.2365.46）随插件 `vendor/webview2/` 分发，Evergreen Runtime 为 Win11 系统组件；DLL 缺席时自动回退默认浏览器打开。相关配置：`ballEnabled`（默认 true）/ `ballSize`（默认 64px）/ `ballColor`（默认 #0A84FF）。
 
 ## 安全模型
 

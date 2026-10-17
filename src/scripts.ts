@@ -279,7 +279,7 @@ ${PS_EPILOGUE}
 /**
  * Trae 风格悬浮球（常驻 GUI 分离进程，不走 JSON 信封——Application.Run 阻塞消息循环）。
  * 参数（stdin JSON argsFile）：Url（点击打开的带 token web 地址）/ Size / Color / PosFile / ShowTerminal?
- * 交互：左键拖动改位置；松开时位移 < 6px 视为点击 → 打开默认浏览器进 AI 对话；
+ * 交互：左键拖动改位置；松开时位移 < 6px 视为点击 → 弹出独立对话窗（Edge App 模式，回退默认浏览器）；
  *      右键菜单：打开对话 / 退出悬浮球。退出时把位置写回 PosFile（跨次启动记忆）。
  */
 export const PS_BALL_SCRIPT = `
@@ -290,6 +290,17 @@ try {
   # 但不要依赖控制台输出，诊断一律走 ball-error.log
   Add-Type -AssemblyName System.Windows.Forms
   Add-Type -AssemblyName System.Drawing
+  # DPI aware：150% 等缩放屏上未声明的进程会被系统虚拟化拉伸（尺寸 ×1.5 且发糊），
+  # 声明后坐标/尺寸一律物理像素，观感与逻辑尺寸 × scale 一致
+  Add-Type -Namespace DshBall -Name Native -MemberDefinition @'
+[DllImport("shcore.dll")]
+public static extern int SetProcessDpiAwareness(int value);
+[DllImport("user32.dll")]
+public static extern uint GetDpiForSystem();
+'@
+  try { [void][DshBall.Native]::SetProcessDpiAwareness(2) } catch { }
+  $scale = 1.0
+  try { $scale = [DshBall.Native]::GetDpiForSystem() / 96.0 } catch { }
   $p = Get-Content -Raw -Path $argsFile -Encoding UTF8 | ConvertFrom-Json
 
   # 越早越好：把自身 pid 写给宿主（宿主经 PS 中继 Start-Process 拉起本进程，
@@ -298,9 +309,9 @@ try {
     try { @{ pid = $PID } | ConvertTo-Json -Compress | Set-Content -Path $p.PidFile -Encoding UTF8 } catch { }
   }
 
-  $size = [int]$p.Size
+  $size = [int]([int]$p.Size * $scale)
   if ($size -lt 28) { $size = 28 }
-  if ($size -gt 160) { $size = 160 }
+  if ($size -gt 240) { $size = 240 }
 
   $form = New-Object System.Windows.Forms.Form
   $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
@@ -347,6 +358,44 @@ try {
   if ($form.Left -gt $vs.X + $vs.Width - 40) { $form.Left = $vs.X + $vs.Width - $size - 24 }
   if ($form.Top -gt $vs.Y + $vs.Height - 40) { $form.Top = $vs.Y + 120 }
 
+  # 点击弹出：独立 WebView2 悬浮对话窗（无边框/置顶/圆角，非浏览器窗口）。
+  # 常驻窗存活 → 命名信号唤起（秒显，页面状态保留不重载）；死了 → 重新拉起 pc-chat.ps1
+  # DllDir 缺席（宿主未重启仍旧 args）→ 回退默认浏览器，保证点击总有用
+  $dir = Split-Path -Parent $argsFile
+  $openChat = {
+    $wvOk = $p.DllDir -and (Test-Path (Join-Path $p.DllDir 'Microsoft.Web.WebView2.WinForms.dll'))
+    if (-not $wvOk) { Start-Process $p.Url; return }
+    $chatPidFile = Join-Path $dir 'chat-pid.json'
+    $alive = $false
+    if (Test-Path $chatPidFile) {
+      try {
+        $op = (Get-Content -Raw -Path $chatPidFile -Encoding UTF8 | ConvertFrom-Json).pid
+        if ($op -and (Get-Process -Id ([int]$op) -ErrorAction SilentlyContinue)) { $alive = $true }
+      } catch { }
+    }
+    if ($alive) {
+      try {
+        $sig = [System.Threading.EventWaitHandle]::new($false, [System.Threading.EventResetMode]::AutoReset, 'dsh-pc-control-chat-show')
+        [void]$sig.Set()
+        $sig.Dispose()
+      } catch { }
+      return
+    }
+    # 窗宽高为物理像素（chat 进程 DPI aware，400×640 逻辑 × scale）
+    $cw = [int](400 * $scale); $ch = [int](640 * $scale)
+    # 弹窗贴着球出现（球在右缘时往左让出窗宽），并夹回虚拟屏幕
+    $x = $form.Left - $cw - 12
+    $y = $form.Top
+    if ($x -lt $vs.X) { $x = $vs.X + 12 }
+    if (($y + $ch) -gt ($vs.Y + $vs.Height)) { $y = $vs.Y + $vs.Height - $ch - 12 }
+    @{
+      Url = $p.Url; Width = $cw; Height = $ch; X = $x; Y = $y
+      PidFile = $chatPidFile; DllDir = $p.DllDir
+    } | ConvertTo-Json -Compress |
+      Set-Content -Path (Join-Path $dir 'chat-args.json') -Encoding UTF8
+    Start-Process -WindowStyle Hidden -FilePath powershell.exe -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $dir 'pc-chat.ps1'),'-argsFile',(Join-Path $dir 'chat-args.json')
+  }
+
   $script:dragOffset = $null
   $script:moveStart = $null
 
@@ -371,24 +420,32 @@ try {
     $script:moveStart = $null
     if ($null -eq $start) { return }
     $dx = [Math]::Abs($form.Left - $start.X) + [Math]::Abs($form.Top - $start.Y)
-    if ($dx -lt 6 -and $e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
-      Start-Process $p.Url
+    if ($dx -lt [Math]::Max(6, [int](6 * $scale)) -and $e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+      & $openChat
     }
   })
 
   # 右键菜单
   $menu = New-Object System.Windows.Forms.ContextMenuStrip
   $itemOpen = $menu.Items.Add('打开 AI 对话')
-  $itemOpen.Add_Click({ Start-Process $p.Url })
+  $itemOpen.Add_Click({ & $openChat })
   $itemExit = $menu.Items.Add('退出悬浮球')
   $itemExit.Add_Click({ $form.Close() })
   $form.ContextMenuStrip = $menu
 
-  # 退出时保存位置
+  # 退出时保存位置 + 连带退出常驻对话窗（用户右键退出路径；
+  # 宿主 taskkill 强杀球不走这里，由宿主 killBall 兜底杀 chat）
   $form.Add_FormClosing({
     try {
       @{ x = $form.Left; y = $form.Top } | ConvertTo-Json -Compress |
         Set-Content -Path $p.PosFile -Encoding UTF8
+    } catch { }
+    try {
+      $chatPidFile = Join-Path (Split-Path -Parent $argsFile) 'chat-pid.json'
+      if (Test-Path $chatPidFile) {
+        $op = (Get-Content -Raw -Path $chatPidFile -Encoding UTF8 | ConvertFrom-Json).pid
+        if ($op) { Stop-Process -Id ([int]$op) -Force -ErrorAction SilentlyContinue }
+      }
     } catch { }
   })
 
@@ -398,7 +455,200 @@ try {
   # 无控制台可输出 → 错误落日志（与 argsFile 同目录），供宿主侧排查
   try {
     $log = Join-Path (Split-Path -Parent $argsFile) 'ball-error.log'
-    ("[{0}] {1}\`r\`n" -f (Get-Date -Format s), $_.Exception.Message) |
+    ("[{0}] {1}" -f (Get-Date -Format s), $_.Exception.Message) |
+      Add-Content -Path $log -Encoding UTF8
+  } catch { }
+  exit 1
+}
+`
+
+/**
+ * Trae 风格悬浮对话窗（独立进程）：WinForms 无边框圆角窗 + WebView2 承载带 token 对话页。
+ * 不是浏览器窗口——无地址栏/标签页/浏览器边框，TopMost 置顶悬浮，顶栏可拖动、右上一键关闭。
+ * 参数（argsFile JSON）：Url / Width / Height / X / Y / PidFile / DllDir（vendor WebView2 SDK 三件套）。
+ * SDK 说明： Evergreen Runtime 为系统组件（Win11 内置），仅托管三件套随插件 vendor（Office PQ 同款 1.0.2365.46）。
+ */
+export const PS_CHAT_SCRIPT = `
+param([string]$argsFile)
+$ErrorActionPreference = 'Stop'
+try {
+  # 经 -WindowStyle Hidden 拉起（有隐藏控制台但不依赖它），诊断一律落 chat-error.log
+  $p = Get-Content -Raw -Path $argsFile -Encoding UTF8 | ConvertFrom-Json
+
+  # pid 自报：球点击先查此文件判断常驻窗是否存活（活 → 信号唤起；死 → 重启进程）
+  if ($p.PidFile) {
+    try { @{ pid = $PID } | ConvertTo-Json -Compress | Set-Content -Path $p.PidFile -Encoding UTF8 } catch { }
+  }
+
+  # WebView2Loader.dll 是 DllImport 解析 → 先把 DLL 目录设为 native 探测目录，再 Add-Type
+  Add-Type -Namespace DshChat -Name Native -MemberDefinition @'
+[DllImport("kernel32.dll", SetLastError = true)]
+public static extern bool SetDllDirectory(string path);
+[DllImport("user32.dll")]
+public static extern bool ReleaseCapture();
+[DllImport("user32.dll")]
+public static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+[DllImport("shcore.dll")]
+public static extern int SetProcessDpiAwareness(int value);
+[DllImport("user32.dll")]
+public static extern uint GetDpiForSystem();
+'@
+  [void][DshChat.Native]::SetDllDirectory($p.DllDir)
+  Add-Type -Path (Join-Path $p.DllDir 'Microsoft.Web.WebView2.Core.dll')
+  Add-Type -Path (Join-Path $p.DllDir 'Microsoft.Web.WebView2.WinForms.dll')
+  Add-Type -AssemblyName System.Windows.Forms
+  Add-Type -AssemblyName System.Drawing
+
+  # DPI aware（须在首个窗体句柄创建前声明）：否则 150% 屏被虚拟化拉伸成 1.5 倍且发糊
+  try { [void][DshChat.Native]::SetProcessDpiAwareness(2) } catch { }
+  $scale = 1.0
+  try { $scale = [DshChat.Native]::GetDpiForSystem() / 96.0 } catch { }
+
+  $lw = [Math]::Min(900, [Math]::Max(280, [int]$p.Width))
+  $lh = [Math]::Min(1400, [Math]::Max(320, [int]$p.Height))
+  $w = [int]($lw * $scale)
+  $h = [int]($lh * $scale)
+  $x = [int]$p.X
+  $y = [int]$p.Y
+
+  $form = New-Object System.Windows.Forms.Form
+  $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
+  $form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+  $form.TopMost = $true
+  $form.Size = New-Object System.Drawing.Size($w, $h)
+  $form.Location = New-Object System.Drawing.Point($x, $y)
+  $form.BackColor = [System.Drawing.Color]::FromArgb(31, 31, 31)
+  $form.Text = 'AI 对话'
+
+  # 圆角窗口（四角 14 逻辑 px 弧，随 DPI 缩放）
+  $r = [int](14 * $scale)
+  $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+  $path.AddArc(0, 0, 2 * $r, 2 * $r, 180, 90)
+  $path.AddArc(($w - 2 * $r), 0, 2 * $r, 2 * $r, 270, 90)
+  $path.AddArc(($w - 2 * $r), ($h - 2 * $r), 2 * $r, 2 * $r, 0, 90)
+  $path.AddArc(0, ($h - 2 * $r), 2 * $r, 2 * $r, 90, 90)
+  $path.CloseFigure()
+  $form.Region = New-Object System.Drawing.Region($path)
+
+  # 顶栏：拖动区 + 球色圆点 + 关闭钮（尺寸随 DPI 缩放）
+  $bar = New-Object System.Windows.Forms.Panel
+  $bar.Dock = [System.Windows.Forms.DockStyle]::Top
+  $bar.Height = [int](30 * $scale)
+  $bar.BackColor = [System.Drawing.Color]::FromArgb(31, 31, 31)
+  $dot = New-Object System.Windows.Forms.Label
+  $dot.Size = New-Object System.Drawing.Size([int](10 * $scale), [int](10 * $scale))
+  $dot.Location = New-Object System.Drawing.Point([int](12 * $scale), [int](10 * $scale))
+  try { $dot.BackColor = [System.Drawing.ColorTranslator]::FromHtml($p.Color) } catch { $dot.BackColor = [System.Drawing.Color]::FromArgb(10, 132, 255) }
+  $close = New-Object System.Windows.Forms.Label
+  $close.Text = [string][char]0xD7
+  $close.Font = New-Object System.Drawing.Font('Segoe UI', [float](12 * $scale))
+  $close.ForeColor = [System.Drawing.Color]::Gainsboro
+  $close.Size = New-Object System.Drawing.Size([int](32 * $scale), [int](30 * $scale))
+  $close.Location = New-Object System.Drawing.Point(($w - [int](34 * $scale)), 0)
+  $close.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+  $close.Cursor = [System.Windows.Forms.Cursors]::Hand
+  $close.Add_Click({ $form.Close() })
+  $bar.Controls.Add($dot)
+  $bar.Controls.Add($close)
+
+  # 无边框拖动：ReleaseCapture + WM_NCLBUTTONDOWN（HTCAPTION=2）
+  $dragForm = {
+    param($sender, $e)
+    if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+      [void][DshChat.Native]::ReleaseCapture()
+      [void][DshChat.Native]::SendMessage($form.Handle, 0xA1, [IntPtr]2, [IntPtr]0)
+    }
+  }
+  $bar.Add_MouseDown($dragForm)
+  $dot.Add_MouseDown($dragForm)
+
+  # WebView2 承载对话页（初始化完成由消息循环驱动，无需手动 await）
+  $wv = New-Object Microsoft.Web.WebView2.WinForms.WebView2
+  $wv.DefaultBackgroundColor = [System.Drawing.Color]::FromArgb(31, 31, 31)
+  $cp = New-Object Microsoft.Web.WebView2.WinForms.CoreWebView2CreationProperties
+  $cp.UserDataFolder = Join-Path (Split-Path -Parent $argsFile) 'wv2-data'
+  $cp.Language = 'zh-CN'
+  $wv.CreationProperties = $cp
+  $wv.Dock = [System.Windows.Forms.DockStyle]::Fill
+  $wv.add_CoreWebView2InitializationCompleted({
+    param($sender, $e)
+    if (-not $e.IsSuccess) {
+      throw ("webview2 init failed: " + $e.InitializationException.Message)
+    }
+  })
+
+  # 首访身份会弹「预览版说明」公告（独立 userData 目录无已读标记）→ 注入 JS 自动点掉，
+  # 点掉后 localStorage 记住，之后不再弹。500ms×8 次重试覆盖 SPA 异步渲染；对话页无「继续」按钮，空转无害
+  $dismissJs = @'
+(function(){
+  var n = 0;
+  function go(){
+    var els = document.querySelectorAll('button, a');
+    for (var i = 0; i < els.length; i++) {
+      var t = (els[i].textContent || '').trim();
+      if (t === '继续') { els[i].click(); return; }
+    }
+    if (++n < 8) setTimeout(go, 500);
+  }
+  go();
+})()
+'@
+  $wv.add_NavigationCompleted({
+    param($sender, $e)
+    try {
+      if ($sender.CoreWebView2) { [void]$sender.CoreWebView2.ExecuteScriptAsync($dismissJs) }
+    } catch { }
+  })
+
+  # 常驻唤起信号：球点击时 Set() → UI Timer 消费 → Show+Activate。
+  # 页面只加载一次，唤起秒显不重载（客户端式体验）；AutoReset 保证一次信号只唤起一次
+  $showSignal = $null
+  try { $showSignal = [System.Threading.EventWaitHandle]::new($false, [System.Threading.EventResetMode]::AutoReset, 'dsh-pc-control-chat-show') } catch { }
+  $uiTimer = New-Object System.Windows.Forms.Timer
+  $uiTimer.Interval = 200
+  $uiTimer.Add_Tick({
+    try {
+      if ($showSignal -and $showSignal.WaitOne(0)) {
+        $form.Show()
+        $form.Activate()
+        $form.TopMost = $true
+      }
+    } catch { }
+  })
+  $uiTimer.Start()
+  $form.Controls.Add($wv)
+  $form.Controls.Add($bar)
+  $wv.Source = [Uri]$p.Url
+
+  # Esc 隐藏（走 FormClosing 统一拦截）
+  $form.KeyPreview = $true
+  $form.Add_KeyDown({
+    param($sender, $e)
+    if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Escape) { $form.Close() }
+  })
+
+  # 关闭 = 隐藏常驻（× / Esc / 系统关闭统一拦截）：WebView2 与页面状态保留，
+  # 下次点击球秒显不重载；真退出只有两条路——球退出时杀进程 / 宿主 killBall 连带清理
+  $form.Add_FormClosing({
+    param($sender, $e)
+    try {
+      $log = Join-Path (Split-Path -Parent $argsFile) 'chat-close.log'
+      Add-Content -Path $log -Value ("[{0}] closing fired reason={1}" -f (Get-Date -Format s), $e.CloseReason) -Encoding UTF8
+    } catch { }
+    try { $e.Cancel = $true; $form.Hide() } catch {
+      try { Add-Content -Path (Join-Path (Split-Path -Parent $argsFile) 'chat-close.log') -Value ("[{0}] ERR {1}" -f (Get-Date -Format s), $_.Exception.Message) -Encoding UTF8 } catch { }
+    }
+  })
+
+  # 常驻消息循环。实测坑：ShowDialog 模式下 Hide() 会让模态循环立即返回 → 脚本 exit 0
+  # → 进程退出，「关闭=隐藏」失效；Application.Run 的循环只在窗体真关闭时结束，
+  # FormClosing Cancel+Hide 后循环继续，等待下次信号唤起
+  [System.Windows.Forms.Application]::Run($form)
+  exit 0
+} catch {
+  try {
+    $log = Join-Path (Split-Path -Parent $argsFile) 'chat-error.log'
+    ("[{0}] {1}" -f (Get-Date -Format s), $_.Exception.Message) |
       Add-Content -Path $log -Encoding UTF8
   } catch { }
   exit 1

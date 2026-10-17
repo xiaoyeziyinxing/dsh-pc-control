@@ -1,6 +1,6 @@
 {
   "name": "dsh-pc-control",
-  "version": "0.2.0",
+  "version": "0.3.2",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -26,13 +26,16 @@
   ],
   "files": [
     "lib",
+    "vendor",
     "cordis.patch.yml"
   ],
   "exports": {
     ".": "./lib/index.js"
   },
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "manifestVersion": 1
   },
   "dependencies": {
